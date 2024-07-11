@@ -24,7 +24,6 @@ class DarkRoom(gym.Env):
             self.goal_pos = self.generate_goal()
 
         self.observation_space = spaces.Discrete(self.size**2)
-        self.action_space = spaces.Discrete(5)
 
         self.action_to_direction = {
             0: np.array((0, 0), dtype=np.float32),  # noop
@@ -33,6 +32,9 @@ class DarkRoom(gym.Env):
             3: np.array((1, 0), dtype=np.float32),  # down
             4: np.array((0, -1), dtype=np.float32),  # left
         }
+
+        self.action_space = spaces.Discrete(self.action_dim)
+
         self.center_pos = (self.size // 2, self.size // 2)
         self.terminate_on_goal = terminate_on_goal
         self.render_mode = render_mode
@@ -74,3 +76,15 @@ class DarkRoom(gym.Env):
             grid[self.goal_pos[0], self.goal_pos[1]] = (255, 0, 0)
             grid[int(self.agent_pos[0]), int(self.agent_pos[1])] = (0, 255, 0)
             return grid
+        
+
+    @property
+    def state_dim(self):
+        return self.size ** 2
+    
+    @property
+    def action_dim(self):
+        return len(self.action_to_direction)
+    
+    def copy(self):
+        return DarkRoom(size=self.size, goal=self.goal_pos, random_start=self.random_start, terminate_on_goal=self.terminate_on_goal, render_mode=self.render_mode)
