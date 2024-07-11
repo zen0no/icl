@@ -1,8 +1,32 @@
+# code inspired by https://github.com/philtabor/Youtube-Code-Repository/blob/master/ReinforcementLearning/PolicyGradient/A3C/pytorch/a3c.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+import torch.multiprocessing as mp
 
+import os
+
+# This lines avoids non-determenistic behaviour of LSTM on CUDA
+os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+
+
+class SharedAdam(torch.optim.Adam):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.99), eps=1e-8,
+            weight_decay=0):
+        super(SharedAdam, self).__init__(params, lr=lr, betas=betas, eps=eps,
+                weight_decay=weight_decay)
+
+        for group in self.param_groups:
+            for p in group['params']:
+                state = self.state[p]
+                state['step'] = 0
+                state['exp_avg'] = torch.zeros_like(p.data)
+                state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                state['exp_avg'].share_memory_()
+                state['exp_avg_sq'].share_memory_()
 
 class NetWithMemory(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
@@ -64,15 +88,16 @@ class A3C(nn.Module):
         self.pi.reset_hidden()
         self.v.reset_hidden()
 
-        states = self.states[:]
-        actions = self.actions[:]
-        rewards = self.rewards[:]
-
         self.states = []
         self.actions = []
         self.rewards = []
 
-        return states, actions, rewards
+    def return_trajectory(self):
+        return {
+            "states": self.states[:],
+            "actions": self.actions[:],
+            "rewards": self.rewards
+        }
 
     def forward(self, state):
         log_prob = self.pi(state)
@@ -122,43 +147,66 @@ class A3C(nn.Module):
         return action
     
 
-class Agent(mp.Process):
-    def __init__(self, global_actor_critic, optimizer, input_dims, n_actions, 
-                gamma, lr, name, global_ep_idx, env_id):
-        super(Agent, self).__init__()
-        self.local_actor_critic = A3(input_dims, n_actions, gamma)
-        self.global_actor_critic = global_actor_critic
-        self.name = 'w%02i' % name
-        self.episode_idx = global_ep_idx
-        self.env = gym.make(env_id)
+class Worker(mp.Process):
+    def __init__(self, global_ac, optimizer, env,
+                gamma, name, global_episode_idx, t_max, max_episode, data_queue):
+        super(Worker, self).__init__()
+        
+        self.env = env
         self.optimizer = optimizer
+        
+        self.env = env
+        state_dim = env.state_dim 
+        action_dim = env.action_dim
+
+        self.local_ac = A3C(state_dim, action_dim, gamma)
+        self.global_actor_critic = global_ac
+        self.name = 'w%02i' % name
+        self.episode_idx = global_episode_idx
+        self.data_queue = data_queue
+
+        self.max_episode = max_episode
+        self.t_max = t_max
 
     def run(self):
         t_step = 1
-        while self.episode_idx.value < N_GAMES:
+
+        while self.episode_idx.value < self.max_episodes:
             done = False
-            observation = self.env.reset()
+            obs = self.env.reset()
             score = 0
-            self.local_actor_critic.clear_memory()
+            self.local_ac.clear_memory()
+
             while not done:
-                action = self.local_actor_critic.choose_action(observation)
-                observation_, reward, done, info = self.env.step(action)
+                action = self.local_ac.act(obs)
+                obs_next, reward, done, _ = self.env.step(action)
                 score += reward
-                self.local_actor_critic.remember(observation, action, reward)
-                if t_step % T_MAX == 0 or done:
-                    loss = self.local_actor_critic.calc_loss(done)
+                self.local_ac.remember(obs, action, reward)
+
+                if t_step % self.t_max == 0 or done:
+                    loss = self.local_ac.loss(done)
                     self.optimizer.zero_grad()
                     loss.backward()
                     for local_param, global_param in zip(
-                            self.local_actor_critic.parameters(),
+                            self.local_ac.parameters(),
                             self.global_actor_critic.parameters()):
                         global_param._grad = local_param.grad
                     self.optimizer.step()
-                    self.local_actor_critic.load_state_dict(
+                    self.local_ac.load_state_dict(
                             self.global_actor_critic.state_dict())
-                    self.local_actor_critic.clear_memory()
+                    self.local_ac.clear_memory()
                 t_step += 1
-                observation = observation_
+                obs = obs_next
             with self.episode_idx.get_lock():
+
+                states, actions, rewards = self.local_ac.return_memorized()
+
                 self.episode_idx.value += 1
-            print(self.name, 'episode ', self.episode_idx.value, 'reward %.1f' % score)
+                self.data_queue.put(
+                    {
+                        "states": states,
+                        "actions": actions,
+                        "rewards": rewards
+                    }
+                )
+            
