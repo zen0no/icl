@@ -26,6 +26,10 @@ class DataCollectionConfig:
     gamma = 0.99
     lambda_ = 0.95
 
+    #env
+
+    size: int=7
+
 
     def __post__init__(self):
         self.name = f""
@@ -49,9 +53,26 @@ def collect(cfg: DataCollectionConfig):
     wandb_init(cfg)
     define_wandb_metric()
 
-    for i in tqdm(range(num_l))
+    for i in tqdm(range(cfg.num_histories)):
+        env = DarkRoom(cfg.size)
+
+        global_ac = A3C(env.state_dim, env.action_dim, cfg.gamma)
+
+        queue = mp.Queue()
+        episode_idx = mp.Value('i', 0)
 
 
-    
+        workers = [Worker(global_ac,
+                optim,
+                input_dims,
+                n_actions,
+                gamma=0.99,
+                lr=lr,
+                name=i,
+                global_ep_idx=global_ep,
+                env_id=env_id) for i in range(mp.cpu_count())]
+
+
+        
 
 
