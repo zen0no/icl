@@ -40,6 +40,9 @@ class DarkRoom(gym.Env):
         self.render_mode = render_mode
         self.random_start = random_start
 
+    def copy(self):
+        return DarkRoom(size=self.size, goal=self.goal_pos, random_start=self.random_start)
+
     def generate_pos(self):
         return self.np_random.integers(0, self.size, size=2).astype(np.float32)
 
@@ -87,4 +90,5 @@ class DarkRoom(gym.Env):
         return len(self.action_to_direction)
     
     def copy(self):
-        return DarkRoom(size=self.size, goal=self.goal_pos, random_start=self.random_start, terminate_on_goal=self.terminate_on_goal, render_mode=self.render_mode)
+        return DarkRoom(size=self.size, goal=self.goal_pos, random_start=self.random_start,
+                        terminate_on_goal=self.terminate_on_goal, render_mode=self.render_mode)

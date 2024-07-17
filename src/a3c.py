@@ -8,6 +8,8 @@ import torch.multiprocessing as mp
 
 import os
 
+import wandb
+
 # This lines avoids non-determenistic behaviour of LSTM on CUDA
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
 
@@ -28,16 +30,19 @@ class SharedAdam(torch.optim.Adam):
                 state['exp_avg'].share_memory_()
                 state['exp_avg_sq'].share_memory_()
 
+
 class NetWithMemory(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(self, nn.Module).__init__()
+        super(NetWithMemory, self).__init__()
 
-        self.h = torch.zeros(1, self.hidden_dim, device=self.device)
-        self.c = torch.zeros(1, self.hidden_dim, device=self.device)
+        self.hidden_dim = hidden_dim
+
+        self.h = torch.zeros(1, self.hidden_dim)
+        self.c = torch.zeros(1, self.hidden_dim)
 
         self.encode = nn.Sequential(
                                     nn.Linear(input_dim, hidden_dim),
-                                    nn.GELU(hidden_dim, hidden_dim),
+                                    nn.GELU(hidden_dim),
                                     nn.Linear(hidden_dim, hidden_dim),
                                     nn.GELU()
                                     )
@@ -55,9 +60,8 @@ class NetWithMemory(nn.Module):
         return self.output(x)
 
     def reset_hidden(self):
-        self.h = torch.zeros(1, self.hidden_dim, device=self.device)
-        self.c = torch.zeros(1, self.hidden_dim, device=self.device)
-
+        self.h = torch.zeros(1, self.hidden_dim)
+        self.c = torch.zeros(1, self.hidden_dim)
 
 
 class A3C(nn.Module):
@@ -72,7 +76,7 @@ class A3C(nn.Module):
         self.gamma = gamma
 
         self.pi = NetWithMemory(state_dim, hidden_dim, action_dim).to(self.device)
-        self.v  = NetWithMemory(state_dim, hidden_dim, 1).to(self.device)
+        self.v = NetWithMemory(state_dim, hidden_dim, 1).to(self.device)
 
         self.states = []
         self.actions = []
@@ -84,7 +88,7 @@ class A3C(nn.Module):
         self.rewards.append(r)
 
     def clear_memory(self):
-        #reset hidden state of memory nets
+        # reset hidden state of memory nets
         self.pi.reset_hidden()
         self.v.reset_hidden()
 
@@ -104,7 +108,6 @@ class A3C(nn.Module):
         value = self.v(state)
 
         return log_prob, value
-
 
     def loss(self, done):
         states = torch.tensor(self.states, dtype=torch.float32)
@@ -133,9 +136,6 @@ class A3C(nn.Module):
 
         return total_loss
 
-
-
-
     @torch.no_grad()
     def act(self, state):
         state = torch.tensor([state], dtype=torch.float32)
@@ -149,58 +149,58 @@ class A3C(nn.Module):
 
 class Worker(mp.Process):
     def __init__(self, global_ac, optimizer, env,
-                gamma, name, global_episode_idx, t_max, max_episode, data_queue):
+                gamma, name, global_ep, t_max, max_episode, data_queue):
         super(Worker, self).__init__()
         
         self.env = env
         self.optimizer = optimizer
-        
-        self.env = env
-        state_dim = env.state_dim 
+        self.gamma = gamma
+
+        state_dim = env.state_dim
         action_dim = env.action_dim
 
         self.local_ac = A3C(state_dim, action_dim, gamma)
         self.global_actor_critic = global_ac
         self.name = 'w%02i' % name
-        self.episode_idx = global_episode_idx
+        self.episode_idx = global_ep
         self.data_queue = data_queue
 
         self.max_episode = max_episode
         self.t_max = t_max
 
     def run(self):
-        t_step = 1
-
-        while self.episode_idx.value < self.max_episodes:
+        while self.episode_idx.value < self.max_episode:
             done = False
             obs = self.env.reset()
             score = 0
+            t_step = 1
+
             self.local_ac.clear_memory()
 
-            while not done:
+            while not done or t_step % self.t_max != 0:
                 action = self.local_ac.act(obs)
                 obs_next, reward, done, _ = self.env.step(action)
                 score += reward
                 self.local_ac.remember(obs, action, reward)
-
-                if t_step % self.t_max == 0 or done:
-                    loss = self.local_ac.loss(done)
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    for local_param, global_param in zip(
-                            self.local_ac.parameters(),
-                            self.global_actor_critic.parameters()):
-                        global_param._grad = local_param.grad
-                    self.optimizer.step()
-                    self.local_ac.load_state_dict(
-                            self.global_actor_critic.state_dict())
-                    self.local_ac.clear_memory()
                 t_step += 1
                 obs = obs_next
+
+            loss = self.local_ac.loss(done)
+            self.optimizer.zero_grad()
+            loss.backward()
+
+            for local_param, global_param in zip(
+                    self.local_ac.parameters(),
+                    self.global_actor_critic.parameters()):
+                global_param._grad = local_param.grad
+            self.optimizer.step()
+            self.local_ac.load_state_dict(
+                self.global_actor_critic.state_dict())
+            self.local_ac.clear_memory()
+
             with self.episode_idx.get_lock():
-
+                wandb.log({"loss": loss.item()}, step=self.episode_idx.value * self.t_max)
                 states, actions, rewards = self.local_ac.return_memorized()
-
                 self.episode_idx.value += 1
                 self.data_queue.put(
                     {
