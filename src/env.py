@@ -50,7 +50,9 @@ class DarkRoom(gym.Env):
         return self.np_random.integers(0, self.size, size=2)
 
     def pos_to_state(self, pos):
-        return int(pos[0] * self.size + pos[1])
+        state = np.zeros(self.size ** 2)
+        state[int(pos[0] * self.size + pos[1])] = 1
+        return state
 
     def state_to_pos(self, state):
         return np.array(divmod(state, self.size))
@@ -79,7 +81,6 @@ class DarkRoom(gym.Env):
             grid[self.goal_pos[0], self.goal_pos[1]] = (255, 0, 0)
             grid[int(self.agent_pos[0]), int(self.agent_pos[1])] = (0, 255, 0)
             return grid
-        
 
     @property
     def state_dim(self):

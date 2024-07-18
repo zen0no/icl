@@ -33,10 +33,11 @@ class DataCollectionConfig:
 
     gamma = 0.99
     lambda_ = 0.95
+    hidden_dim = 32
 
-    lr=3e-3
-    device='cpu'
-    size: int=9
+    lr = 3e-3
+    device = 'cuda'
+    size: int = 9
 
     def __post__init__(self):
         self.name = f""
@@ -51,21 +52,25 @@ def set_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
+
 def dump_trajectory(path: Path, trajectory):
     path.mkdir(parents=True, exist_ok=True)
+    with open(path, 'r') as f:
+        np.savez(f, trajectory)
 
 
 @pyrallis.wrap()
 def collect(cfg: DataCollectionConfig):
-    for i in tqdm(range(cfg.num_histories)):
+    for i in range(cfg.num_histories):
         wandb_init(cfg)
 
         history_meta = dict()
-        history_path = Path(os.path.join(cfg.data_path,f"history_{i}")).resolve()
+        history_path = Path(os.path.join(cfg.data_path, f"history_{i}")).resolve()
 
         env = DarkRoom(cfg.size)
 
-        global_ac = A3C(env.state_dim, env.action_dim, cfg.gamma)
+        global_ac = A3C(state_dim=env.state_dim, action_dim=env.action_dim, hidden_dim=cfg.hidden_dim, gamma=cfg.gamma,
+                        device=cfg.device)
         global_ac.share_memory()
 
         queue = mp.Queue()
@@ -73,19 +78,21 @@ def collect(cfg: DataCollectionConfig):
         optim = SharedAdam(global_ac.parameters(), lr=cfg.lr)
 
         workers = [Worker(global_ac=global_ac,
-                optimizer=optim,
-                env=env.copy(),
-                gamma=cfg.gamma,
-                name=str(i),
-                global_ep=episode_idx,
-                data_queue=queue,
-                t_max=cfg.episode_max_t,
-                max_episode=cfg.max_episodes) for i in range(mp.cpu_count())]
+                          optimizer=optim,
+                          env=env.copy(),
+                          gamma=cfg.gamma,
+                          name=i,
+                          global_ep=episode_idx,
+                          data_queue=queue,
+                          t_max=cfg.episode_max_t,
+                          max_episode=cfg.max_episodes,
+                          hidden_dim=cfg.hidden_dim,
+                          device=cfg.device) for i in range(2)]
 
         [w.start() for w in workers]
         while episode_idx.value < cfg.max_episodes:
             if not queue.empty():
-                with episode_idx.lock:
+                with episode_idx.get_lock():
                     trajectory_path = history_path / f"trajectory_{episode_idx.value}.npy"
                     trajectory = queue.get()
 
@@ -100,7 +107,3 @@ def collect(cfg: DataCollectionConfig):
 
 if __name__ == "__main__":
     collect()
-
-        
-
-

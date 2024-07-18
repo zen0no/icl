@@ -1,4 +1,5 @@
 # code inspired by https://github.com/philtabor/Youtube-Code-Repository/blob/master/ReinforcementLearning/PolicyGradient/A3C/pytorch/a3c.py
+import gc
 
 import torch
 import torch.nn as nn
@@ -6,12 +7,22 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import torch.multiprocessing as mp
 
+import numpy as np
+
 import os
 
 import wandb
 
 # This lines avoids non-determenistic behaviour of LSTM on CUDA
 os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':16:8'
+
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight)
+    if isinstance(m, nn.RNNCellBase):
+        torch.nn.init.xavier_uniform_(m.weight_hh)
+        torch.nn.init.xavier_uniform_(m.weight_ih)
+
 
 
 class SharedAdam(torch.optim.Adam):
@@ -32,25 +43,32 @@ class SharedAdam(torch.optim.Adam):
 
 
 class NetWithMemory(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, hidden_dim, output_dim, device):
         super(NetWithMemory, self).__init__()
+
+        self.device = device
 
         self.hidden_dim = hidden_dim
 
-        self.h = torch.zeros(1, self.hidden_dim)
-        self.c = torch.zeros(1, self.hidden_dim)
+        self.h = torch.zeros(1, self.hidden_dim, device=device)
+        self.c = torch.zeros(1, self.hidden_dim, device=device)
 
-        self.encode = nn.Sequential(
-                                    nn.Linear(input_dim, hidden_dim),
-                                    nn.GELU(hidden_dim),
-                                    nn.Linear(hidden_dim, hidden_dim),
-                                    nn.GELU()
-                                    )
-        self.lstm = nn.LSTMCell(hidden_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, output_dim)
+        self.embed = nn.Linear(input_dim, hidden_dim).to(device)
+        self.lstm = nn.LSTMCell(hidden_dim, hidden_dim).to(device)
+        self.output = nn.Sequential(
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim)
+            ).to(device)
+
+        self.init_weights()
+
+    def init_weights(self):
+        self.embed.apply(init_weights)
+        self.lstm.apply(init_weights)
+        self.output.apply(init_weights)
 
     def forward(self, x):
-        x = self.encode(x)
+        x = self.embed(x)
         h, c = self.lstm(x, (self.h, self.c))
 
         x = self.h = h
@@ -60,8 +78,8 @@ class NetWithMemory(nn.Module):
         return self.output(x)
 
     def reset_hidden(self):
-        self.h = torch.zeros(1, self.hidden_dim)
-        self.c = torch.zeros(1, self.hidden_dim)
+        self.h = torch.zeros(1, self.hidden_dim, device=self.device)
+        self.c = torch.zeros(1, self.hidden_dim, device=self.device)
 
 
 class A3C(nn.Module):
@@ -75,8 +93,11 @@ class A3C(nn.Module):
 
         self.gamma = gamma
 
-        self.pi = NetWithMemory(state_dim, hidden_dim, action_dim).to(self.device)
-        self.v = NetWithMemory(state_dim, hidden_dim, 1).to(self.device)
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+
+        self.pi = NetWithMemory(state_dim, hidden_dim, action_dim, device=self.device)
+        self.v = NetWithMemory(state_dim, hidden_dim, 1, device=self.device)
 
         self.states = []
         self.actions = []
@@ -110,10 +131,21 @@ class A3C(nn.Module):
         return log_prob, value
 
     def loss(self, done):
-        states = torch.tensor(self.states, dtype=torch.float32)
-        actions = torch.tensor(self.actions, dtype=torch.float32)
+        states = torch.tensor(self.states, dtype=torch.float32, device=self.device)
+        actions = torch.tensor(self.actions, dtype=torch.float32, device=self.device)
 
-        pi, values = self.forward(states)
+        seq_len = states.shape[0]
+
+        values = torch.zeros((seq_len, ), device=self.device)
+        pi = torch.zeros((seq_len, self.action_dim), device=self.device)
+
+        self.pi.reset_hidden()
+        self.v.reset_hidden()
+
+        for i in range(seq_len):
+            pi_, values_ = self.forward(states[i].unsqueeze(0))
+            pi[i] = torch.squeeze(pi_)
+            values[i] = torch.squeeze(values_)
 
         # calculate returns and critic loss
         R = values[-1]*(1-int(done))
@@ -122,7 +154,7 @@ class A3C(nn.Module):
             R = reward + self.gamma*R
             returns.append(R)
         returns.reverse()
-        returns = torch.tensor(returns, dtype=torch.float32)
+        returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
         values.squeeze()
         critic_loss = (returns - values) ** 2
 
@@ -138,18 +170,18 @@ class A3C(nn.Module):
 
     @torch.no_grad()
     def act(self, state):
-        state = torch.tensor([state], dtype=torch.float32)
+        state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         pi, v = self.forward(state)
         probs = torch.softmax(pi, dim=1)
         d = Categorical(probs)
-        action = d.sample().numpy()[0]
+        action = d.sample().detach().cpu().numpy()[0]
 
         return action
     
 
 class Worker(mp.Process):
     def __init__(self, global_ac, optimizer, env,
-                gamma, name, global_ep, t_max, max_episode, data_queue):
+                gamma, name, global_ep, t_max, max_episode, hidden_dim, data_queue, device=None):
         super(Worker, self).__init__()
         
         self.env = env
@@ -159,7 +191,7 @@ class Worker(mp.Process):
         state_dim = env.state_dim
         action_dim = env.action_dim
 
-        self.local_ac = A3C(state_dim, action_dim, gamma)
+        self.local_ac = A3C(state_dim=state_dim, action_dim=action_dim, hidden_dim=hidden_dim, gamma=gamma, device=device)
         self.global_actor_critic = global_ac
         self.name = 'w%02i' % name
         self.episode_idx = global_ep
@@ -171,15 +203,16 @@ class Worker(mp.Process):
     def run(self):
         while self.episode_idx.value < self.max_episode:
             done = False
-            obs = self.env.reset()
+            obs, _ = self.env.reset()
             score = 0
             t_step = 1
 
             self.local_ac.clear_memory()
-
-            while not done or t_step % self.t_max != 0:
+            while t_step % self.t_max != 0 and not done:
+                print(t_step)
+                print(t_step % self.t_max == 0)
                 action = self.local_ac.act(obs)
-                obs_next, reward, done, _ = self.env.step(action)
+                obs_next, reward, done, _, _ = self.env.step(action)
                 score += reward
                 self.local_ac.remember(obs, action, reward)
                 t_step += 1
@@ -199,6 +232,7 @@ class Worker(mp.Process):
             self.local_ac.clear_memory()
 
             with self.episode_idx.get_lock():
+                print(f'{self.episode_idx.value} loss: {loss.item()}')
                 wandb.log({"loss": loss.item()}, step=self.episode_idx.value * self.t_max)
                 states, actions, rewards = self.local_ac.return_memorized()
                 self.episode_idx.value += 1
@@ -209,4 +243,6 @@ class Worker(mp.Process):
                         "rewards": rewards
                     }
                 )
-            
+
+            torch.cuda.empty_cache()
+            gc.collect()
