@@ -159,7 +159,7 @@ class A3C(nn.Module):
         critic_loss = (returns - values) ** 2
 
         # calculate actor loss
-        probs = torch.softmax(pi)
+        probs = F.softmax(pi, dim=-1)
         d = Categorical(probs)
         log_prob = d.log_prob(actions)
         actor_loss = -log_prob*(returns - values)
@@ -193,6 +193,7 @@ class Worker(mp.Process):
 
         self.local_ac = A3C(state_dim=state_dim, action_dim=action_dim, hidden_dim=hidden_dim, gamma=gamma, device=device)
         self.global_actor_critic = global_ac
+
         self.name = 'w%02i' % name
         self.episode_idx = global_ep
         self.data_queue = data_queue
@@ -202,15 +203,14 @@ class Worker(mp.Process):
 
     def run(self):
         while self.episode_idx.value < self.max_episode:
+
+            self.local_ac.clear_memory()
             done = False
             obs, _ = self.env.reset()
             score = 0
             t_step = 1
 
-            self.local_ac.clear_memory()
             while t_step % self.t_max != 0 and not done:
-                print(t_step)
-                print(t_step % self.t_max == 0)
                 action = self.local_ac.act(obs)
                 obs_next, reward, done, _, _ = self.env.step(action)
                 score += reward
@@ -229,12 +229,10 @@ class Worker(mp.Process):
             self.optimizer.step()
             self.local_ac.load_state_dict(
                 self.global_actor_critic.state_dict())
-            self.local_ac.clear_memory()
 
             with self.episode_idx.get_lock():
-                print(f'{self.episode_idx.value} loss: {loss.item()}')
-                wandb.log({"loss": loss.item()}, step=self.episode_idx.value * self.t_max)
-                states, actions, rewards = self.local_ac.return_memorized()
+                states, actions, rewards = self.local_ac.return_trajectory()
+                print(f"{self.episode_idx.value} / {self.max_episode}")
                 self.episode_idx.value += 1
                 self.data_queue.put(
                     {

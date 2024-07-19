@@ -1,16 +1,14 @@
 import uuid
-from random import random
-
+import random
 import pyrallis
 from dataclasses import dataclass, asdict
 import wandb
-from wandb.wandb_torch import torch
-
+import torch
 from src.a3c import Worker, A3C, SharedAdam
 from src.env import DarkRoom
 
 import torch.multiprocessing as mp
-from tqdm import tqdm
+
 from pathlib import Path
 import numpy as np
 import os
@@ -36,16 +34,9 @@ class DataCollectionConfig:
     hidden_dim = 32
 
     lr = 3e-3
-    device = 'cuda'
+    device = 'cpu'
     size: int = 9
-
-    def __post__init__(self):
-        self.name = f""
-
-
-def wandb_init(cfg: DataCollectionConfig):
-    wandb.init(project=cfg.project, group=cfg.group, name=cfg.name, config=asdict(cfg), id=str(uuid.uuid4()))
-
+    seed: int = 42
 
 def set_seed(seed):
     random.seed(seed)
@@ -55,14 +46,18 @@ def set_seed(seed):
 
 def dump_trajectory(path: Path, trajectory):
     path.mkdir(parents=True, exist_ok=True)
-    with open(path, 'r') as f:
-        np.savez(f, trajectory)
+    np.savez(path, trajectory)
 
 
 @pyrallis.wrap()
 def collect(cfg: DataCollectionConfig):
+
+    set_seed(cfg.seed)
+
+    mp.Manager
+
     for i in range(cfg.num_histories):
-        wandb_init(cfg)
+        run = wandb.init(project=cfg.project, group=cfg.group, name=cfg.name, config=asdict(cfg), id=str(uuid.uuid4()))
 
         history_meta = dict()
         history_path = Path(os.path.join(cfg.data_path, f"history_{i}")).resolve()
@@ -103,6 +98,8 @@ def collect(cfg: DataCollectionConfig):
         history_meta_path = history_path / f"meta.json"
         with open(history_meta_path, "w") as f:
             json.dump(history_meta, f)
+
+        run.finish()
 
 
 if __name__ == "__main__":
