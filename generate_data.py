@@ -23,17 +23,14 @@ class DataCollectionConfig:
 
     data_path: str = "data"
 
-    num_histories: int = 500
-    train_steps: int = 1000
-
+    num_histories: int = 2
     episode_max_t: int = 20
-    max_episodes: int = 50
+    max_episodes: int = 1000
 
     gamma = 0.99
-    lambda_ = 0.95
     hidden_dim = 32
 
-    lr = 3e-3
+    lr = 1e-4
     device = 'cpu'
     size: int = 9
     seed: int = 42
@@ -45,8 +42,14 @@ def set_seed(seed):
 
 
 def dump_trajectory(path: Path, trajectory):
-    path.mkdir(parents=True, exist_ok=True)
     np.savez(path, trajectory)
+
+
+def calculate_return(rewards: np.array, gamma: float):
+    r = 0
+    for reward in rewards[::-1]:
+        r = reward + gamma * r
+    return r
 
 
 @pyrallis.wrap()
@@ -54,13 +57,12 @@ def collect(cfg: DataCollectionConfig):
 
     set_seed(cfg.seed)
 
-    mp.Manager
-
     for i in range(cfg.num_histories):
         run = wandb.init(project=cfg.project, group=cfg.group, name=cfg.name, config=asdict(cfg), id=str(uuid.uuid4()))
 
         history_meta = dict()
         history_path = Path(os.path.join(cfg.data_path, f"history_{i}")).resolve()
+        history_path.mkdir(parents=True, exist_ok=True)
 
         env = DarkRoom(cfg.size)
 
@@ -71,6 +73,8 @@ def collect(cfg: DataCollectionConfig):
         queue = mp.Queue()
         episode_idx = mp.Value('i', 0)
         optim = SharedAdam(global_ac.parameters(), lr=cfg.lr)
+
+        trajectory_counter = 0
 
         workers = [Worker(global_ac=global_ac,
                           optimizer=optim,
@@ -85,14 +89,21 @@ def collect(cfg: DataCollectionConfig):
                           device=cfg.device) for i in range(2)]
 
         [w.start() for w in workers]
-        while episode_idx.value < cfg.max_episodes:
-            if not queue.empty():
-                with episode_idx.get_lock():
-                    trajectory_path = history_path / f"trajectory_{episode_idx.value}.npy"
-                    trajectory = queue.get()
 
-                    dump_trajectory(trajectory_path, trajectory)
-                    history_meta[episode_idx.value] = trajectory_path
+        # Collect all trajectories from workers and dump them + log episode return
+        while episode_idx.value < cfg.max_episodes or not queue.empty():
+            if not queue.empty():
+                trajectory = queue.get()
+                trajectory_path = history_path / f"trajectory_{trajectory_counter}.npz"
+                history_meta[trajectory_counter] = str(trajectory_path)
+
+                dump_trajectory(trajectory_path, trajectory)
+
+                trajectory_counter += 1
+
+                r = calculate_return(trajectory['rewards'], cfg.gamma)
+                wandb.log({"episode_return": r})
+
         [w.join() for w in workers]
 
         history_meta_path = history_path / f"meta.json"

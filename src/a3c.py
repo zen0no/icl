@@ -102,11 +102,13 @@ class A3C(nn.Module):
         self.states = []
         self.actions = []
         self.rewards = []
+        self.dones = []
 
-    def remember(self, s, a, r):
+    def remember(self, s, a, r, d):
         self.states.append(s)
         self.actions.append(a)
         self.rewards.append(r)
+        self.dones.append(d)
 
     def clear_memory(self):
         # reset hidden state of memory nets
@@ -116,12 +118,14 @@ class A3C(nn.Module):
         self.states = []
         self.actions = []
         self.rewards = []
+        self.dones = []
 
     def return_trajectory(self):
         return {
-            "states": self.states[:],
-            "actions": self.actions[:],
-            "rewards": self.rewards
+            "states": np.array(self.states[:], dtype=np.uint8),
+            "actions": np.array(self.actions[:], dtype=np.uint8),
+            "rewards": np.array(self.rewards[:], dtype=np.uint8),
+            "dones": np.array(self.dones[:], dtype=np.uint8)
         }
 
     def forward(self, state):
@@ -131,8 +135,8 @@ class A3C(nn.Module):
         return log_prob, value
 
     def loss(self, done):
-        states = torch.tensor(self.states, dtype=torch.float32, device=self.device)
-        actions = torch.tensor(self.actions, dtype=torch.float32, device=self.device)
+        states = torch.tensor(np.array(self.states), dtype=torch.float32, device=self.device)
+        actions = torch.tensor(np.array(self.actions), dtype=torch.float32, device=self.device)
 
         seq_len = states.shape[0]
 
@@ -214,7 +218,7 @@ class Worker(mp.Process):
                 action = self.local_ac.act(obs)
                 obs_next, reward, done, _, _ = self.env.step(action)
                 score += reward
-                self.local_ac.remember(obs, action, reward)
+                self.local_ac.remember(obs, action, reward, done)
                 t_step += 1
                 obs = obs_next
 
@@ -231,16 +235,9 @@ class Worker(mp.Process):
                 self.global_actor_critic.state_dict())
 
             with self.episode_idx.get_lock():
-                states, actions, rewards = self.local_ac.return_trajectory()
-                print(f"{self.episode_idx.value} / {self.max_episode}")
+                trajectory = self.local_ac.return_trajectory()
                 self.episode_idx.value += 1
-                self.data_queue.put(
-                    {
-                        "states": states,
-                        "actions": actions,
-                        "rewards": rewards
-                    }
-                )
+                self.data_queue.put(trajectory)
 
             torch.cuda.empty_cache()
             gc.collect()
