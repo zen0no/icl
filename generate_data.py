@@ -1,117 +1,155 @@
 import uuid
-import random
-import pyrallis
 from dataclasses import dataclass, asdict
-import wandb
-import torch
-from src.a3c import Worker, A3C, SharedAdam
+import numpy as np
+import random
+
 from src.env import DarkRoom
 
-import torch.multiprocessing as mp
-
+import pyrallis
 from pathlib import Path
-import numpy as np
-import os
+import wandb
+from tqdm import tqdm
 import json
 
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 @dataclass
 class DataCollectionConfig:
     project: str = "icl"
     group: str = "collect_data"
-    name: str = "a3c_collect_data"
-
+    env_name: str = "darkroom"
     data_path: str = "data"
 
-    num_histories: int = 2
-    episode_max_t: int = 20
-    max_episodes: int = 1000
-
+    num_histories: int = 10
+    num_timesteps: int = int(1e6)
     gamma = 0.99
-    hidden_dim = 32
+    epsilon = 1.
 
     lr = 1e-4
-    device = 'cpu'
     size: int = 9
+    terminate_on_goal: bool = False
+    random_start: bool = True
+    max_episode_steps: int = 20
+    action_dim: int = 5
     seed: int = 42
+
+    def __post_init__(self):
+        self.state_dim = self.size ** 2
+        self.name = f"{self.env_name}_{self.group}_{uuid.uuid4()}"
+
 
 def set_seed(seed):
     random.seed(seed)
-    torch.manual_seed(seed)
     np.random.seed(seed)
 
 
-def dump_trajectory(path: Path, trajectory):
-    np.savez(path, trajectory)
+class RolloutBuffer:
+    def __init__(self):
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+
+    def add(self, state, action, reward, done):
+        self.states.append(state)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.dones.append(done)
+
+    def clear(self):
+        self.states = []
+        self.actions = []
+        self.rewards = []
+        self.dones = []
+
+    def get_trajectory(self):
+        return {
+            "states": np.array(self.states, dtype=np.int32),
+            "actions": np.array(self.actions, dtype=np.int32),
+            "rewards": np.array(self.rewards, dtype=np.int32),
+            "dones": np.array(self.dones, dtype=np.uint8),
+        }
 
 
-def calculate_return(rewards: np.array, gamma: float):
-    r = 0
-    for reward in rewards[::-1]:
-        r = reward + gamma * r
-    return r
+class QLearning:
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99, epsilon=1.):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+
+        self.q_table = np.zeros((self.state_dim, self.action_dim))
+        self.lr = lr
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def act(self, state):
+        if random.random() < self.epsilon:
+            return random.randrange(self.action_dim)
+        else:
+            return np.argmax(self.q_table[state, :])
+
+    def update(self, state, action, reward, next_state):
+        self.q_table[state, action] += self.lr * (reward + self.gamma *
+                                   (np.max(self.q_table[next_state, :]) - self.q_table[state, action]))
 
 
 @pyrallis.wrap()
-def collect(cfg: DataCollectionConfig):
+def generate(cfg: DataCollectionConfig):
 
+    env = DarkRoom(size=cfg.size, random_start=cfg.random_start, terminate_on_goal=cfg.terminate_on_goal)
     set_seed(cfg.seed)
+    env.reset(seed=cfg.seed)
 
-    for i in range(cfg.num_histories):
-        run = wandb.init(project=cfg.project, group=cfg.group, name=cfg.name, config=asdict(cfg), id=str(uuid.uuid4()))
+    eps_diff = 1.0 / (0.9 * (cfg.num_timesteps // cfg.max_episode_steps))
 
-        history_meta = dict()
-        history_path = Path(os.path.join(cfg.data_path, f"history_{i}")).resolve()
-        history_path.mkdir(parents=True, exist_ok=True)
+    data_path = Path(cfg.data_path).resolve()
+    data_path.mkdir(exist_ok=True, parents=True)
 
-        env = DarkRoom(cfg.size)
+    for history_id in range(cfg.num_histories):
 
-        global_ac = A3C(state_dim=env.state_dim, action_dim=env.action_dim, hidden_dim=cfg.hidden_dim, gamma=cfg.gamma,
-                        device=cfg.device)
-        global_ac.share_memory()
+        run = wandb.init(project=cfg.project, name=cfg.name, group=cfg.group, config=asdict(cfg))
 
-        queue = mp.Queue()
-        episode_idx = mp.Value('i', 0)
-        optim = SharedAdam(global_ac.parameters(), lr=cfg.lr)
-
-        trajectory_counter = 0
-
-        workers = [Worker(global_ac=global_ac,
-                          optimizer=optim,
-                          env=env.copy(),
-                          gamma=cfg.gamma,
-                          name=i,
-                          global_ep=episode_idx,
-                          data_queue=queue,
-                          t_max=cfg.episode_max_t,
-                          max_episode=cfg.max_episodes,
-                          hidden_dim=cfg.hidden_dim,
-                          device=cfg.device) for i in range(2)]
-
-        [w.start() for w in workers]
-
-        # Collect all trajectories from workers and dump them + log episode return
-        while episode_idx.value < cfg.max_episodes or not queue.empty():
-            if not queue.empty():
-                trajectory = queue.get()
-                trajectory_path = history_path / f"trajectory_{trajectory_counter}.npz"
-                history_meta[trajectory_counter] = str(trajectory_path)
-
-                dump_trajectory(trajectory_path, trajectory)
-
-                trajectory_counter += 1
-
-                r = calculate_return(trajectory['rewards'], cfg.gamma)
-                wandb.log({"episode_return": r})
-
-        [w.join() for w in workers]
-
+        history_meta = {}
+        history_path = data_path / f"history_{history_id}"
+        history_path.mkdir(exist_ok=True)
         history_meta_path = history_path / f"meta.json"
-        with open(history_meta_path, "w") as f:
-            json.dump(history_meta, f)
 
-        run.finish()
+        episode_counter = 1
 
+        q_learning = QLearning(cfg.state_dim, cfg.action_dim, lr=cfg.lr, gamma=cfg.gamma, epsilon=cfg.epsilon)
+        env.generate_goal()
+        state, _ = env.reset()
+
+        buffer = RolloutBuffer()
+
+        for timestep_counter in tqdm(range(1, cfg.num_timesteps + 1)):
+            action = q_learning.act(state)
+            next_state, reward, done, _, _ = env.step(action)
+
+            buffer.add(state, action, reward, done)
+
+            q_learning.update(state, action, reward, next_state)
+
+            if timestep_counter % cfg.max_episode_steps == 0:
+
+                q_learning.epsilon = max(0, q_learning.epsilon - eps_diff)
+
+                trajectory = buffer.get_trajectory()
+                trajectory_path = history_path / f"trajectory_{episode_counter}"
+                np.savez(trajectory_path, trajectory)
+
+                history_meta[episode_counter] = str(trajectory_path)
+                wandb.log({"score": trajectory["rewards"].sum()})
+
+                next_state, _ = env.reset()
+                buffer.clear()
+                episode_counter += 1
+
+            state = next_state
+
+        with open(str(history_meta_path), "w") as f:
+            f.write(json.dumps(history_meta))
+        wandb.finish()
 
 if __name__ == "__main__":
-    collect()
+    generate()
