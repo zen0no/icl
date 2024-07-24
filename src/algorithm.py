@@ -7,26 +7,31 @@ class RolloutBuffer:
         self.states = []
         self.actions = []
         self.rewards = []
-        self.dones = []
+        self.terminated = []
+        self.truncated = []
 
-    def add(self, state, action, reward, done):
+    def add(self, state, action, reward, terminated, truncated):
         self.states.append(state)
         self.actions.append(action)
         self.rewards.append(reward)
-        self.dones.append(done)
+        self.terminated.append(terminated)
+        self.truncated.append(truncated)
 
     def clear(self):
         self.states = []
         self.actions = []
         self.rewards = []
-        self.dones = []
+        self.terminated = []
+        self.truncated = []
+
 
     def get_trajectory(self):
         return {
-            "states": np.array(self.states, dtype=np.int32),
-            "actions": np.array(self.actions, dtype=np.int32),
-            "rewards": np.array(self.rewards, dtype=np.int32),
-            "dones": np.array(self.dones, dtype=np.uint8),
+            "states": np.array(self.states, dtype=np.uint8),
+            "actions": np.array(self.actions, dtype=np.uint8),
+            "rewards": np.array(self.rewards, dtype=np.uint8),
+            "terminated": np.array(self.terminated, dtype=np.bool_),
+            "truncated": np.array(self.truncated, dtype=np.bool_)
         }
 
 
