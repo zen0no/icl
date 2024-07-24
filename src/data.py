@@ -46,7 +46,8 @@ def pad_along_axis(
 
 
 class HistoryDataset(Dataset):
-        def __init__(self, data_path: Path, state_dim, action_dim, seq_len: int = 40, reward_scale: float = 1.0):
+        def __init__(self, data_path: Path, state_dim, action_dim, seq_len: int = 40, reward_scale: float = 1.0,
+                     masking_prob=0.):
             self.reward_scale = reward_scale
             self.seq_len = seq_len
             self.histories = load_histories(data_path)
@@ -56,6 +57,8 @@ class HistoryDataset(Dataset):
 
             self.state_dim = state_dim
             self.action_dim = action_dim
+
+            self.masking_prob = masking_prob
 
             assert self.seq_len < min_len, (self.seq_len, min_len)
 
@@ -98,8 +101,9 @@ class HistoryDataset(Dataset):
             actions = np.eye(self.action_dim)[actions_idx, :]
 
             # pad up to seq_len if needed
+            random_masking = np.int32(np.random.rand() > self.masking_prob)
             mask = np.hstack(
-                [np.ones(states.shape[0]), np.zeros(self.seq_len - states.shape[0])]
+                [random_masking, np.zeros(self.seq_len - states.shape[0])]
             )
             if states.shape[0] < self.seq_len:
                 states = pad_along_axis(states, pad_to=self.seq_len)
