@@ -86,6 +86,7 @@ class DarkRoom(gym.Env):
     @property
     def action_dim(self):
         return len(self.action_to_direction)
+
     
     def copy(self):
         return DarkRoom(size=self.size, goal=self.goal_pos, random_start=self.random_start,
