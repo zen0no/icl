@@ -8,11 +8,11 @@ import random
 from pathlib import Path
 
 
-def load_single_history(history_paths_queue: mp.Queue):
-    history_path: Path = history_paths_queue.get()
+def load_single_history(history_path: Path):
     trajectories = {}
     for p in history_path.glob("*.npz"):
-        trajectory_dict = np.load(p, "r")
+        trajectory_dict = np.load(p, "r", allow_pickle=True)["arr_0"]
+        print(trajectory_dict.shape)
         traj = np.stack([trajectory_dict["states"],
                          trajectory_dict["actions"],
                          trajectory_dict["rewards"],
@@ -29,7 +29,7 @@ def load_single_history(history_paths_queue: mp.Queue):
 
 def load_histories(data_path: Path):
     with mp.Pool(mp.cpu_count()) as p:
-        return p.map(load_single_history, data_path.glob("history_*/"))
+        return p.map(load_single_history, list(data_path.glob("history_*/")))
 
 
 # some utils functionalities specific for Decision Transformer
