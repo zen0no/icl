@@ -8,8 +8,7 @@ import random
 from pathlib import Path
 
 
-def load_single_history(history_paths_queue: mp.Queue):
-    history_path: Path = history_paths_queue.get()
+def load_single_history(history_path):
     trajectories = {}
     for p in history_path.glob("*.npz"):
         trajectory_dict = np.load(p, "r")
@@ -17,7 +16,7 @@ def load_single_history(history_paths_queue: mp.Queue):
                          trajectory_dict["actions"],
                          trajectory_dict["rewards"],
                          trajectory_dict["dones"]],
-                        dtype=np.int32)
+                        dtype=np.uint8)
         traj_id = int(p.stem)
         trajectories[traj_id] = traj
 
@@ -29,7 +28,7 @@ def load_single_history(history_paths_queue: mp.Queue):
 
 def load_histories(data_path: Path):
     with mp.Pool(mp.cpu_count()) as p:
-        return p.map(load_single_history, data_path.glob("history_*/"))
+        return p.map(load_single_history, list(data_path.glob("history_*/")))
 
 
 # some utils functionalities specific for Decision Transformer
@@ -60,13 +59,10 @@ class HistoryDataset(Dataset):
 
             self.masking_prob = masking_prob
 
-            assert self.seq_len < min_len, (self.seq_len, min_len)
-
         def _build_prefix_sum(self, lists):
             cumulative_lengths = []
             total_length = 0
             for lst in lists:
-                assert len(lst) >= self.seq_len
                 total_length += len(lst) - self.seq_len
                 cumulative_lengths.append(total_length)
 
