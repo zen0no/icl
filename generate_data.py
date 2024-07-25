@@ -12,7 +12,6 @@ import pyrallis
 from pathlib import Path
 import wandb
 from tqdm import tqdm
-import json
 
 @dataclass
 class DataCollectionConfig:
