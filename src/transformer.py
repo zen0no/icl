@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int, seq_len: int, num_heads: int=4, attn_dropout: float=0., res_dropout: float=0.):
+    def __init__(self, embed_dim: int, seq_len: int, feedforward_dim: int, num_heads: int=4, attn_dropout: float=0., res_dropout: float=0.):
         super(TransformerBlock, self).__init__()
         self.ln1 = nn.LayerNorm(embed_dim)
         self.ln2 = nn.LayerNorm(embed_dim)
@@ -16,9 +16,9 @@ class TransformerBlock(nn.Module):
                                           dropout=attn_dropout,
                                           batch_first=True)
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, 4 * embed_dim),
+            nn.Linear(embed_dim, feedforward_dim),
             nn.GELU(),
-            nn.Linear(4 * embed_dim, embed_dim),
+            nn.Linear(feedforward_dim, embed_dim),
         )
 
         self.res_dropout = nn.Dropout(res_dropout)
@@ -48,8 +48,9 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim, seq_len=40, num_blocks=4, num_attention_heads=4,
-                 attn_dropout=0., res_dropout=0., embed_dropout=0.):
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int, feedforward_dim: int,
+                 seq_len: int = 40, num_blocks: int = 4, num_attention_heads: int = 4,
+                 attn_dropout: float =0., res_dropout: float =0., embed_dropout: float = 0.):
         super(Transformer, self).__init__()
         self.hidden_dim = hidden_dim
 
@@ -62,6 +63,7 @@ class Transformer(nn.Module):
             TransformerBlock(
                 embed_dim=hidden_dim,
                 seq_len=3 * seq_len,
+                feedforward_dim=feedforward_dim,
                 num_heads=num_attention_heads,
                 attn_dropout=attn_dropout,
                 res_dropout=res_dropout
