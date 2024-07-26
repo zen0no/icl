@@ -1,41 +1,47 @@
+import os
+import random
 import uuid
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import gym
-import numpy as np
-import random
-
-from envs import DarkRoom
 import gymnasium as gym
-from src.algorithm import QLearning, RolloutBuffer
+import numpy as np
 import pyrallis
-from pathlib import Path
-import wandb
 from tqdm import tqdm
+
+import wandb
+from src.algorithm import QLearning, RolloutBuffer
+
 
 @dataclass
 class DataCollectionConfig:
+    # wandb
     project: str = "icl"
     group: str = "collect_data"
-    env_name: str = "darkroom"
+    env_name: str = "DarkRoom"
+    algorithm: str = "q_learning"
     data_path: str = "data"
 
-    num_histories: int = 1
-    num_timesteps: int = int(1e6)
+    # training
+    num_train_envs: int = 100
+    num_train_episodes: int = 20_000
     gamma = 0.99
     epsilon = 1.
-
     lr = 1e-4
+    seed: int = 42
+
+    # env properties
     size: int = 9
     terminate_on_goal: bool = False
     random_start: bool = True
     max_episode_steps: int = 20
     action_dim: int = 5
-    seed: int = 42
 
     def __post_init__(self):
         self.state_dim = self.size ** 2
         self.name = f"{self.env_name}_{self.group}_{uuid.uuid4()}"
+        self.data_path = os.path.join(self.data_path, f"{self.env_name}_{self.algorithm}")
 
 
 def set_seed(seed):
@@ -50,6 +56,7 @@ def dump_trajectory(path, traj):
              rewards=np.uint8(traj["rewards"]),
              dones=np.uint8(traj["terminated"] | traj["truncated"]))
 
+
 @pyrallis.wrap()
 def generate(cfg: DataCollectionConfig):
 
@@ -57,12 +64,12 @@ def generate(cfg: DataCollectionConfig):
     set_seed(cfg.seed)
     env.reset(seed=cfg.seed)
 
-    eps_diff = 1.0 / (0.9 * (cfg.num_timesteps // cfg.max_episode_steps))
+    eps_diff = 1.0 / (0.9 * cfg.num_train_episodes)
 
     data_path = Path(cfg.data_path).resolve()
     data_path.mkdir(exist_ok=True, parents=True)
 
-    for history_id in range(cfg.num_histories):
+    for history_id in range(cfg.num_train_envs):
 
         run = wandb.init(project=cfg.project, name=cfg.name, group=cfg.group, config=asdict(cfg))
 
@@ -72,12 +79,12 @@ def generate(cfg: DataCollectionConfig):
         episode_counter = 0
 
         q_learning = QLearning(cfg.state_dim, cfg.action_dim, lr=cfg.lr, gamma=cfg.gamma, epsilon=cfg.epsilon)
-        env.generate_goal()
+        env.unwrapped.generate_goal()
         state, _ = env.reset()
 
         buffer = RolloutBuffer()
 
-        for timestep_counter in tqdm(range(1, cfg.num_timesteps + 1)):
+        while True:
             action = q_learning.act(state)
             next_state, reward, terminated, truncated, _ = env.step(action)
 
@@ -98,9 +105,11 @@ def generate(cfg: DataCollectionConfig):
                 next_state, _ = env.reset()
                 buffer.clear()
                 episode_counter += 1
+                if episode_counter >= cfg.num_train_episodes:
+                    break
 
             state = next_state
-        wandb.finish()
+        run.finish()
 
 
 if __name__ == "__main__":

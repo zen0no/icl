@@ -1,9 +1,7 @@
 import numpy as np
 
 import torch.multiprocessing as mp
-from torch.utils.data import Dataset
-
-import random
+from torch.utils.data import IterableDataset
 
 from pathlib import Path
 
@@ -33,7 +31,7 @@ def load_histories(data_path: Path):
 
 # some utils functionalities specific for Decision Transformer
 def pad_along_axis(
-    arr: np.ndarray, pad_to: int, axis: int = 0, fill_value: float = 0.0
+    arr: np.ndarray, pad_to: int, axis: int = 0, fill_value: int = 0
 ) -> np.ndarray:
     pad_size = pad_to - arr.shape[axis]
     if pad_size <= 0:
@@ -44,50 +42,23 @@ def pad_along_axis(
     return np.pad(arr, pad_width=npad, mode="constant", constant_values=fill_value)
 
 
-class HistoryDataset(Dataset):
+class SequentialDataset(IterableDataset):
         def __init__(self, data_path: Path, state_dim, action_dim, seq_len: int = 40, reward_scale: float = 1.0,
                      masking_prob=0.):
             self.reward_scale = reward_scale
             self.seq_len = seq_len
             self.histories = load_histories(data_path)
 
-            self._prefix_sum = self._build_prefix_sum(self.histories)
-            min_len = np.min([len(x) for x in self.histories])
-
             self.state_dim = state_dim
             self.action_dim = action_dim
 
             self.masking_prob = masking_prob
 
-        def _build_prefix_sum(self, lists):
-            cumulative_lengths = []
-            total_length = 0
-            for lst in lists:
-                total_length += len(lst) - self.seq_len
-                cumulative_lengths.append(total_length)
-
-            return np.array(cumulative_lengths)
-
-        def _convert_index(self, index):
-            # Binary search to find the correct list
-            low, high = 0, len(self._prefix_sum)
-            while low < high:
-                mid = (low + high) // 2
-                if self._prefix_sum[mid] <= index:
-                    low = mid + 1
-                else:
-                    high = mid
-
-            list_index = low
-            local_index = index - (
-                self._prefix_sum[list_index - 1] if list_index > 0 else 0
-            )
-
-            return list_index, local_index
-
-        def __prepare_sample(self, idx):
-            history_idx, start_idx = self._convert_index(idx)
+        def __prepare_random_sample(self):
+            history_idx = np.random.randint(0, len(self.histories))
             hist = self.histories[history_idx]
+
+            start_idx = np.random.randint(0, hist.shape[0])
             states_idx = hist[0, start_idx:start_idx + self.seq_len]
             actions_idx = hist[2, start_idx:start_idx + self.seq_len]
             returns = hist[1, start_idx:start_idx + self.seq_len]
@@ -108,8 +79,7 @@ class HistoryDataset(Dataset):
 
             return states, actions, returns, time_steps, mask
 
-        def __len__(self):
-            return self._prefix_sum[-1]
+        def __iter__(self):
+            while True:
+                yield self.__prepare_random_sample()
 
-        def __getitem__(self, idx):
-            return self.__prepare_sample(idx)
