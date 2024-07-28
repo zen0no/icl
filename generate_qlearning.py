@@ -58,7 +58,7 @@ def dump_meta(path: Path, meta: dict):
 def dump_trajectory(path, traj):
     np.savez(path,
              states=np.uint8(traj["states"]),
-             actions=np.uint8(traj["states"]),
+             actions=np.uint8(traj["actions"]),
              rewards=np.uint8(traj["rewards"]),
              dones=np.uint8(traj["terminated"] | traj["truncated"]))
 

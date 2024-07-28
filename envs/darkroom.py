@@ -51,6 +51,7 @@ class DarkRoom(gym.Env):
 
     def pos_to_state(self, pos):
         return int(pos[0] * self.size + pos[1])
+
     def state_to_pos(self, state):
         return np.array(divmod(state, self.size))
 

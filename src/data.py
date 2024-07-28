@@ -69,9 +69,8 @@ class SequentialDataset(IterableDataset):
 
             start_idx = np.random.randint(0, hist.shape[0])
             states_idx = hist[0, start_idx:start_idx + self.seq_len]
-            actions_idx = hist[2, start_idx:start_idx + self.seq_len]
-            returns = hist[1, start_idx:start_idx + self.seq_len]
-            time_steps = np.arange(start_idx, start_idx + self.seq_len)
+            actions_idx = hist[1, start_idx:start_idx + self.seq_len]
+            returns = hist[2, start_idx:start_idx + self.seq_len, None]
 
             states = np.eye(self.state_dim)[states_idx, :]
             actions = np.eye(self.action_dim)[actions_idx, :]
@@ -89,10 +88,9 @@ class SequentialDataset(IterableDataset):
             states = torch.from_numpy(states).type(torch.float32)
             actions = torch.from_numpy(actions).type(torch.float32)
             returns = torch.from_numpy(returns).type(torch.float32)
-            time_steps = torch.from_numpy(time_steps).type(torch.int32)
             mask = torch.from_numpy(mask).type(torch.float32)
 
-            return states, actions, returns, time_steps, mask
+            return states, actions, returns, mask
 
         def __iter__(self):
             while True:

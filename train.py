@@ -120,19 +120,17 @@ def train(config: TrainConfig):
 
     for train_step in trange(0, config.num_train_steps, desc='Train'):
 
-        states, actions, rewards, time_steps, masks = next(dataloader)
+        states, actions, rewards, masks = next(dataloader)
 
         states = states.to(config.device)
         actions = actions.to(config.device)
         rewards = rewards.to(config.device)
-        time_steps = time_steps.to(config.device)
         masks = masks.to(config.device)
 
         pred = model(
             states=states,
             actions=actions,
             rewards=rewards,
-            timesteps=time_steps,
             padding_mask=masks
         )
 
