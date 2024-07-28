@@ -1,4 +1,7 @@
+import json
+
 import numpy as np
+import torch
 
 import torch.multiprocessing as mp
 from torch.utils.data import IterableDataset
@@ -38,21 +41,27 @@ def pad_along_axis(
         return arr
 
     npad = [(0, 0)] * arr.ndim
-    npad[axis] = (0, pad_size)
+    npad[axis] = (pad_size, 0)
     return np.pad(arr, pad_width=npad, mode="constant", constant_values=fill_value)
 
 
 class SequentialDataset(IterableDataset):
-        def __init__(self, data_path: Path, state_dim, action_dim, seq_len: int = 40, reward_scale: float = 1.0,
-                     masking_prob=0.):
+        def __init__(self, data_path: Path, seq_len: int = 40, reward_scale: float = 1.0,
+                     masking_prob: float = 0., device: str = 'cpu'):
+
+            with open(str(data_path/ "meta.json"), "r") as f:
+                self.meta = json.load(f)
+
+            self.state_dim = self.meta['state_dim']
+            self.action_dim = self.meta['action_dim']
+
             self.reward_scale = reward_scale
             self.seq_len = seq_len
+            print("Loading dataset...")
             self.histories = load_histories(data_path)
-
-            self.state_dim = state_dim
-            self.action_dim = action_dim
-
+            print("Dataset loaded")
             self.masking_prob = masking_prob
+            self.device = device
 
         def __prepare_random_sample(self):
             history_idx = np.random.randint(0, len(self.histories))
@@ -70,12 +79,18 @@ class SequentialDataset(IterableDataset):
             # pad up to seq_len if needed
             random_masking = np.int32(np.random.rand() > self.masking_prob)
             mask = np.hstack(
-                [random_masking, np.zeros(self.seq_len - states.shape[0])]
+                [np.zeros(self.seq_len - states.shape[0]), random_masking]
             )
             if states.shape[0] < self.seq_len:
                 states = pad_along_axis(states, pad_to=self.seq_len)
                 actions = pad_along_axis(actions, pad_to=self.seq_len)
                 returns = pad_along_axis(returns, pad_to=self.seq_len)
+
+            states = torch.from_numpy(states).type(torch.float32)
+            actions = torch.from_numpy(actions).type(torch.float32)
+            returns = torch.from_numpy(returns).type(torch.float32)
+            time_steps = torch.from_numpy(time_steps).type(torch.int32)
+            mask = torch.from_numpy(mask).type(torch.float32)
 
             return states, actions, returns, time_steps, mask
 

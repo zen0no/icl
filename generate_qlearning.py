@@ -1,9 +1,11 @@
+import json
 import os
 import random
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+import envs
 import gym
 import gymnasium as gym
 import numpy as np
@@ -24,7 +26,7 @@ class DataCollectionConfig:
     data_path: str = "data"
 
     # training
-    num_train_envs: int = 100
+    num_train_envs: int = 5
     num_train_episodes: int = 20_000
     gamma = 0.99
     epsilon = 1.
@@ -48,6 +50,10 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
 
+def dump_meta(path: Path, meta: dict):
+    with open(str(path), 'w') as f:
+        json.dump(meta, f)
+
 
 def dump_trajectory(path, traj):
     np.savez(path,
@@ -60,14 +66,29 @@ def dump_trajectory(path, traj):
 @pyrallis.wrap()
 def generate(cfg: DataCollectionConfig):
 
-    env = gym.make("DarkRoom", max_episode_steps=20, size=cfg.size, random_start=cfg.random_start, terminate_on_goal=cfg.terminate_on_goal)
+    env = gym.make(cfg.env_name, max_episode_steps=cfg.max_episode_steps, size=cfg.size, random_start=cfg.random_start, terminate_on_goal=cfg.terminate_on_goal)
     set_seed(cfg.seed)
     env.reset(seed=cfg.seed)
+
+    meta = {
+        "env_name": cfg.env_name,
+        "state_dim": env.unwrapped.state_dim,
+        "action_dim": env.unwrapped.action_dim,
+        "max_episode_steps": cfg.max_episode_steps,
+        "size": cfg.size,
+        "random_start": cfg.random_start,
+        "terminate_on_goal": cfg.terminate_on_goal,
+        "num_train_envs": cfg.num_train_envs,
+        "num_train_episodes": cfg.num_train_episodes
+    }
 
     eps_diff = 1.0 / (0.9 * cfg.num_train_episodes)
 
     data_path = Path(cfg.data_path).resolve()
     data_path.mkdir(exist_ok=True, parents=True)
+
+    meta_path = data_path / "meta.json"
+    dump_meta(meta_path, meta)
 
     for history_id in range(cfg.num_train_envs):
 
