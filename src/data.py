@@ -68,27 +68,24 @@ class SequentialDataset(IterableDataset):
             hist = self.histories[history_idx]
 
             start_idx = np.random.randint(0, hist.shape[0])
-            states_idx = hist[0, start_idx:start_idx + self.seq_len]
-            actions_idx = hist[1, start_idx:start_idx + self.seq_len]
+            states = hist[0, start_idx:start_idx + self.seq_len]
+            actions = hist[1, start_idx:start_idx + self.seq_len]
             returns = hist[2, start_idx:start_idx + self.seq_len, None]
 
-            states = np.eye(self.state_dim)[states_idx, :]
-            actions = np.eye(self.action_dim)[actions_idx, :]
-
             # pad up to seq_len if needed
-            random_masking = np.int32(np.random.rand() > self.masking_prob)
-            mask = np.hstack(
-                [np.zeros(self.seq_len - states.shape[0]), random_masking]
+            random_masking = np.int32(np.random.rand(states.shape[0], 1) > self.masking_prob)
+            mask = np.vstack(
+                [np.zeros((self.seq_len - states.shape[0], 1),), random_masking]
             )
             if states.shape[0] < self.seq_len:
                 states = pad_along_axis(states, pad_to=self.seq_len)
                 actions = pad_along_axis(actions, pad_to=self.seq_len)
                 returns = pad_along_axis(returns, pad_to=self.seq_len)
 
-            states = torch.from_numpy(states).type(torch.float32)
-            actions = torch.from_numpy(actions).type(torch.float32)
+            states = torch.from_numpy(states).type(torch.long)
+            actions = torch.from_numpy(actions).type(torch.long)
             returns = torch.from_numpy(returns).type(torch.float32)
-            mask = torch.from_numpy(mask).type(torch.float32)
+            mask = torch.from_numpy(mask).type(torch.bool)
 
             return states, actions, returns, mask
 
