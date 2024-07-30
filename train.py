@@ -1,25 +1,30 @@
 import gc
-
-import wandb
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-
-from torch.utils.data import DataLoader
-from src.transformer import Transformer
-from src.data import SequentialDataset
-
+import uuid
 from dataclasses import dataclass, asdict
-
-import pyrallis
-from tqdm import trange
-
-from typing import Tuple
+from functools import partial
 from pathlib import Path
+from typing import Tuple
+from itertools import count
 
+import uuid
+
+import envs
+import json
+
+import gymnasium as gym
+import numpy as np
+import pyrallis
+import torch
+import torch.nn.functional as F
+import torch.optim as optim
+import wandb
+from gymnasium.vector import SyncVectorEnv
+from torch.utils.data import DataLoader
+from tqdm import trange, tqdm
+
+from src.data import SequentialDataset
+from src.transformer import Transformer
 from src.utils.scheduler import cosine_annealing_with_warmup
-from src.utils.envs import make_eval_envs
 
 
 @dataclass
@@ -37,12 +42,12 @@ class TrainConfig:
 
     # model
     num_attn_head: int = 4
-    num_layers: int = 4
+    num_layers: int = 8
     attn_dropout_rate: float = 0.3
     res_dropout_rate: float = 0.
     embed_dropout_rate: float = 0.
     feed_forward_dim = 2048
-    hidden_dim: int = 64
+    hidden_dim: int = 128
 
     # train
     train_context_multiplier: float = 4.
@@ -51,20 +56,23 @@ class TrainConfig:
     lr: float = 3e-4
     num_train_steps: int = 100_000
     warmap_steps: int = 20_000
+    checkpoint_path: str = "checkpoint"
 
     # evaluation
     eval_env_name: str = "DarkRoom"
     eval_context_multipliers: Tuple[float] = (0.5, 1., 2., 4.)
     eval_log_every: int = 10
     eval_num_episodes: int = 1000
-    num_eval_envs: int = 10
+    eval_num_envs: int = 10
 
     def __post_init__(self):
+        self.uuid: str = str(uuid.uuid4())
         self.train_seed: int = self.seed
-        self.valid_seed: int = 100 + self.seed
+        self.eval_seed: int = 100 + self.seed
         self.train_seq_len: int = int(self.max_episode_steps * self.train_context_multiplier)
 
-        self.train_run_name = f"train_"
+        self.train_run_name = f"train_ad_{self.uuid}"
+        self.eval_run_name = f"evaluate_ad_{self.eval_env_name}_{self.uuid}"
 
 
 def iter_dataloader(dataloader):
@@ -74,13 +82,73 @@ def iter_dataloader(dataloader):
 
 
 @torch.no_grad()
-def eval_in_context(config: TrainConfig, env_props: dict):
-    envs = make_eval_envs(config.num_eval_envs, config.eval_env_name, **env_props)
-
+def eval_in_context(model: Transformer, config: TrainConfig, env_props):
     for multiplier in config.eval_context_multipliers:
-        seq_len = config.max_episode_steps * multiplier
+        rng = np.random.default_rng(seed=config.eval_seed)
 
-        states = torch.zeros(config.state)
+        num_envs = config.eval_num_envs
+        eval_envs = SyncVectorEnv([
+            partial(gym.make, id=config.eval_env_name, rng=rng, **env_props) for _ in range(num_envs)
+        ])
+
+        runs = [wandb.init(
+            project=config.project,
+            group=config.group,
+            name=f"{config.eval_run_name}_{multiplier}_episode"
+        ) for _ in range(num_envs)]
+
+        seq_len = int(config.max_episode_steps * multiplier)
+
+        states = torch.zeros(num_envs, seq_len, dtype=torch.long, device=config.device)
+        actions = torch.zeros(num_envs, seq_len, dtype=torch.long, device=config.device)
+        rewards = torch.zeros(num_envs, seq_len, 1, dtype=torch.float32, device=config.device)
+
+        init_states, _ = eval_envs.reset()
+
+        states[:, -1] = torch.from_numpy(init_states).to(config.device)
+
+        num_dones = np.zeros(num_envs, dtype=np.int32)
+
+        current_scores = np.zeros(num_envs)
+        current_lengths = np.zeros(num_envs)
+
+        for i in tqdm(count(start=1), desc="Evaluation"):
+            sliced_states = states[:, -i:]
+            sliced_actions = actions[:, -i:]
+            sliced_rewards = rewards[:, -i:]
+
+            pred = model(
+                states=sliced_states,
+                actions=sliced_actions,
+                rewards=sliced_rewards
+            )
+
+            pred = pred[:, -1, :]
+
+            dist = torch.distributions.Categorical(pred)
+            action = dist.sample().squeeze(-1)
+
+            state, reward, term, trunc, _ = eval_envs.step(action.cpu().numpy())
+
+            for i in np.where(term | trunc)[0]:
+                if num_dones[i] < config.eval_num_episodes:
+                    runs[i].log({"score": current_scores[i]})
+                    runs[i].log({"lenghts": current_lengths[i]})
+                    current_scores[i] = 0
+                    current_lengths[i] = 0
+
+            states = states.roll(-1, dims=0)
+            actions = actions.roll(-1, dims=0)
+            rewards = rewards.roll(-1, dims=0)
+
+            states[-1] = torch.from_numpy(state).type(torch.long).to(config.device)
+            actions[-2] = action
+            rewards[-2] = torch.from_numpy(reward).type(torch.long).to(config.device).unsqueeze(-1)
+
+            if np.min(num_dones) >= config.eval_num_episodes:
+                break
+
+        [run.finish() for run in runs]
 
 
 @pyrallis.wrap()
@@ -105,6 +173,8 @@ def train(config: TrainConfig):
         embed_dropout=config.embed_dropout_rate
     ).to(config.device)
 
+    print(f"Running model with {sum(p.numel() for p in model.parameters())} parameters")
+
 
     optimizer = optim.Adam(model.parameters(), lr=config.lr)
     scheduler = cosine_annealing_with_warmup(optimizer,
@@ -117,6 +187,10 @@ def train(config: TrainConfig):
     )
 
     dataloader = iter_dataloader(dataloader)
+
+    run = wandb.init(project=config.project,
+                     group=config.group,
+                     name=config.train_run_name)
 
     for train_step in trange(0, config.num_train_steps, desc='Train'):
 
@@ -134,7 +208,9 @@ def train(config: TrainConfig):
             padding_mask=masks
         )
 
-        loss = F.cross_entropy(pred, actions)
+        loss = F.cross_entropy(pred, torch.eye(pred.shape[-1])[actions])
+        print(pred, torch.eye(pred.shape[-1])[actions])
+        run.log({"loss": loss.item()})
 
         loss.backward()
         optimizer.step()
@@ -142,6 +218,18 @@ def train(config: TrainConfig):
 
         torch.cuda.empty_cache()
         gc.collect()
+
+    run.finish()
+
+    # save train
+    checkpoint_path = Path(config.checkpoint_path)
+    torch.save(model.state_dict(), checkpoint_path/"weights.pt")
+    with open(str(checkpoint_path / "train_config.json"), 'r') as f:
+        json.dump(asdict(config), f, indent=2)
+
+    eval_in_context(model, config, dataset.meta)
+
+
 
 
 
