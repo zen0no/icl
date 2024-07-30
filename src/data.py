@@ -46,8 +46,7 @@ def pad_along_axis(
 
 
 class SequentialDataset(IterableDataset):
-        def __init__(self, data_path: Path, seq_len: int = 40, reward_scale: float = 1.0,
-                     masking_prob: float = 0., device: str = 'cpu'):
+        def __init__(self, data_path: Path, seq_len: int = 40, reward_scale: float = 1.0, device: str = 'cpu'):
 
             with open(str(data_path/ "meta.json"), "r") as f:
                 self.meta = json.load(f)
@@ -60,7 +59,6 @@ class SequentialDataset(IterableDataset):
             print("Loading dataset...")
             self.histories = load_histories(data_path)
             print("Dataset loaded")
-            self.masking_prob = masking_prob
             self.device = device
 
         def __prepare_random_sample(self):
@@ -71,23 +69,25 @@ class SequentialDataset(IterableDataset):
             states = hist[0, start_idx:start_idx + self.seq_len]
             actions = hist[1, start_idx:start_idx + self.seq_len]
             returns = hist[2, start_idx:start_idx + self.seq_len, None]
+            timesteps = np.arange(self.seq_len)
 
             # pad up to seq_len if needed
-            random_masking = np.int32(np.random.rand(states.shape[0], 1) > self.masking_prob)
-            mask = np.vstack(
-                [np.zeros((self.seq_len - states.shape[0], 1),), random_masking]
+            mask = np.hstack(
+                [np.ones(self.seq_len - states.shape[0]).astype(np.bool_), np.zeros(states.shape[0]).astype(np.bool_)]
             )
             if states.shape[0] < self.seq_len:
                 states = pad_along_axis(states, pad_to=self.seq_len)
                 actions = pad_along_axis(actions, pad_to=self.seq_len)
                 returns = pad_along_axis(returns, pad_to=self.seq_len)
+                timesteps = pad_along_axis(timesteps, pad_to=self.seq_len)
 
             states = torch.from_numpy(states).type(torch.long)
             actions = torch.from_numpy(actions).type(torch.long)
             returns = torch.from_numpy(returns).type(torch.float32)
+            timesteps = torch.from_numpy(timesteps).type(torch.long)
             mask = torch.from_numpy(mask).type(torch.bool)
 
-            return states, actions, returns, mask
+            return states, actions, returns, timesteps, mask
 
         def __iter__(self):
             while True:

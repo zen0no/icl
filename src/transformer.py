@@ -57,6 +57,7 @@ class Transformer(nn.Module):
         self.state_embedding = nn.Embedding(state_dim, hidden_dim)
         self.action_embedding = nn.Embedding(action_dim, hidden_dim)
         self.reward_embedding = nn.Linear(1, hidden_dim)
+        self.time_embedding = nn.Embedding(seq_len, hidden_dim)
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(
@@ -93,13 +94,16 @@ class Transformer(nn.Module):
             states: torch.Tensor,
             actions: torch.Tensor,
             rewards: torch.Tensor,
+            timesteps: torch.Tensor,
             padding_mask: torch.Tensor = None
     ) -> torch.FloatTensor:
         batch_size, seq_len = states.shape[0], states.shape[1]
 
-        states_embeds = self.state_embedding(states)
-        actions_embeds = self.action_embedding(actions)
-        rewards_embeds = self.reward_embedding(rewards)
+        timestep_embeds = self.time_embedding(timesteps)
+
+        states_embeds = self.state_embedding(states) + timestep_embeds
+        actions_embeds = self.action_embedding(actions) + timestep_embeds
+        rewards_embeds = self.reward_embedding(rewards) + timestep_embeds
 
         sequence = (
             torch.stack([rewards_embeds, states_embeds, actions_embeds], dim=1)
@@ -109,7 +113,7 @@ class Transformer(nn.Module):
 
         if padding_mask is not None:
             padding_mask = (
-                torch.vstack([padding_mask, padding_mask, padding_mask] )
+                torch.stack([padding_mask, padding_mask, padding_mask], dim=1)
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )
@@ -120,6 +124,6 @@ class Transformer(nn.Module):
         for b in self.transformer_blocks:
             out = b(out, padding_mask=padding_mask)
 
-        out = self.action_head(out[:, 0::3])
+        out = self.action_head(out[:, 2::3])
 
         return out
