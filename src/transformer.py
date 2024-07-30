@@ -54,8 +54,8 @@ class Transformer(nn.Module):
         super(Transformer, self).__init__()
         self.hidden_dim = hidden_dim
 
-        self.state_embedding = nn.Linear(state_dim, hidden_dim)
-        self.action_embedding = nn.Linear(action_dim, hidden_dim)
+        self.state_embedding = nn.Embedding(state_dim, hidden_dim)
+        self.action_embedding = nn.Embedding(action_dim, hidden_dim)
         self.reward_embedding = nn.Linear(1, hidden_dim)
 
         self.transformer_blocks = nn.ModuleList([
@@ -102,19 +102,20 @@ class Transformer(nn.Module):
         rewards_embeds = self.reward_embedding(rewards)
 
         sequence = (
-            torch.stack([states_embeds, actions_embeds, rewards_embeds], dim=1)
+            torch.stack([rewards_embeds, states_embeds, actions_embeds], dim=1)
             .permute(0, 2, 1, 3)
             .reshape(batch_size, 3 * seq_len, self.hidden_dim)
         )
 
         if padding_mask is not None:
             padding_mask = (
-                torch.stack([padding_mask, padding_mask, padding_mask], dim=1)
+                torch.vstack([padding_mask, padding_mask, padding_mask] )
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )
 
         out = self.embed_ln(self.embed_dropout(sequence))
+
 
         for b in self.transformer_blocks:
             out = b(out, padding_mask=padding_mask)
