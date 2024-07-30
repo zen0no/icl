@@ -106,24 +106,23 @@ class Transformer(nn.Module):
         rewards_embeds = self.reward_embedding(rewards) + timestep_embeds
 
         sequence = (
-            torch.stack([rewards_embeds, states_embeds, actions_embeds], dim=1)
+            torch.stack([states_embeds, actions_embeds, rewards_embeds], dim=1)
             .permute(0, 2, 1, 3)
             .reshape(batch_size, 3 * seq_len, self.hidden_dim)
         )
 
         if padding_mask is not None:
             padding_mask = (
-                torch.stack([padding_mask, padding_mask, padding_mask], dim=1)
+                torch.concatenate([padding_mask, padding_mask, padding_mask], axis=-1)
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )
 
         out = self.embed_ln(self.embed_dropout(sequence))
 
-
         for b in self.transformer_blocks:
             out = b(out, padding_mask=padding_mask)
 
-        out = self.action_head(out[:, 2::3])
+        out = self.action_head(out[:, 0::3])
 
         return out

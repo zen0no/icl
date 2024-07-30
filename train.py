@@ -28,6 +28,7 @@ from tqdm import trange, tqdm
 from src.data import SequentialDataset
 from src.transformer import Transformer
 from src.utils.scheduler import cosine_annealing_with_warmup
+from src.utils.log import log_wandb_runs
 
 
 @dataclass
@@ -91,7 +92,7 @@ def iter_dataloader(dataloader):
 
 
 @torch.no_grad()
-def eval_in_context(model: Transformer, config: TrainConfig, env_props):
+def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_props):
     for multiplier in config.eval_context_multipliers:
         set_seed(config.eval_seed)
         rng = np.random.default_rng(seed=config.eval_seed)
@@ -100,12 +101,6 @@ def eval_in_context(model: Transformer, config: TrainConfig, env_props):
         eval_envs = SyncVectorEnv([
             partial(gym.make, id=config.eval_env_name, rng=rng, **env_props) for _ in range(num_envs)
         ])
-
-        runs = [wandb.init(
-            project=config.project,
-            group=config.group,
-            name=f"{config.eval_run_name}_{multiplier}_episode"
-        ) for _ in range(num_envs)]
 
         seq_len = int(config.max_episode_steps * multiplier)
 
@@ -118,6 +113,13 @@ def eval_in_context(model: Transformer, config: TrainConfig, env_props):
         states[:, -1] = torch.from_numpy(init_states).to(config.device)
 
         num_dones = np.zeros(num_envs, dtype=np.int32)
+
+        metrics = [
+            {
+                'scores': [],
+                'lengths': []
+            } for _ in range(num_envs)
+        ]
 
         current_scores = np.zeros(num_envs)
         current_lengths = np.zeros(num_envs)
@@ -142,10 +144,14 @@ def eval_in_context(model: Transformer, config: TrainConfig, env_props):
 
             state, reward, term, trunc, _ = eval_envs.step(action.cpu().numpy())
 
+            current_scores += reward
+            current_lengths += 1
+            num_dones += (term | trunc).astype(np.int32)
+
             for i in np.where(term | trunc)[0]:
                 if num_dones[i] < config.eval_num_episodes:
-                    runs[i].log({"score": current_scores[i]})
-                    runs[i].log({"lenghts": current_lengths[i]})
+                    metrics[i]['scores'].append(current_scores[i])
+                    metrics[i]['lengths'].append(current_lengths[i])
                     current_scores[i] = 0
                     current_lengths[i] = 0
 
@@ -160,8 +166,11 @@ def eval_in_context(model: Transformer, config: TrainConfig, env_props):
             if np.min(num_dones) >= config.eval_num_episodes:
                 break
 
-        [run.finish() for run in runs]
-
+        log_wandb_runs(project=config.project,
+                       group=config.group,
+                       name=f'{config.eval_run_name}_{multiplier}_episode_{step}_step',
+                       config=asdict(config),
+                       data=metrics)
 
 @pyrallis.wrap()
 def train(config: TrainConfig):
