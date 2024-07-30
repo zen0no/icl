@@ -18,20 +18,20 @@ class RolloutBuffer:
         self.truncated.append(truncated)
 
     def clear(self):
-        self.states = []
-        self.actions = []
-        self.rewards = []
-        self.terminated = []
-        self.truncated = []
-
+        del self.states[:]
+        del self.actions[:]
+        del self.rewards[:]
+        del self.terminated[:]
+        del self.truncated[:]
 
     def get_trajectory(self):
         return {
-            "states": np.array(self.states, dtype=np.uint8),
-            "actions": np.array(self.actions, dtype=np.uint8),
-            "rewards": np.array(self.rewards, dtype=np.uint8),
+            "states": np.array(self.states, dtype=np.int32),
+            "actions": np.array(self.actions, dtype=np.int32),
+            "rewards": np.array(self.rewards, dtype=np.int32),
             "terminated": np.array(self.terminated, dtype=np.bool_),
-            "truncated": np.array(self.truncated, dtype=np.bool_)
+            "truncated": np.array(self.truncated, dtype=np.bool_),
+
         }
 
 

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, embed_dim: int, seq_len: int, num_heads: int=4, attn_dropout: float=0., res_dropout: float=0.):
+    def __init__(self, embed_dim: int, seq_len: int, feedforward_dim: int, num_heads: int=4, attn_dropout: float=0., res_dropout: float=0.):
         super(TransformerBlock, self).__init__()
         self.ln1 = nn.LayerNorm(embed_dim)
         self.ln2 = nn.LayerNorm(embed_dim)
@@ -16,9 +16,9 @@ class TransformerBlock(nn.Module):
                                           dropout=attn_dropout,
                                           batch_first=True)
         self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, 4 * embed_dim),
+            nn.Linear(embed_dim, feedforward_dim),
             nn.GELU(),
-            nn.Linear(4 * embed_dim, embed_dim),
+            nn.Linear(feedforward_dim, embed_dim),
         )
 
         self.res_dropout = nn.Dropout(res_dropout)
@@ -48,20 +48,22 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim, seq_len=40, num_blocks=4, num_attention_heads=4,
-                 attn_dropout=0., res_dropout=0., embed_dropout=0.):
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int, feedforward_dim: int,
+                 seq_len: int = 40, num_blocks: int = 4, num_attention_heads: int = 4,
+                 attn_dropout: float =0., res_dropout: float =0., embed_dropout: float = 0.):
         super(Transformer, self).__init__()
         self.hidden_dim = hidden_dim
 
-        self.state_embedding = nn.Linear(state_dim, hidden_dim)
-        self.action_embedding = nn.Linear(action_dim, hidden_dim)
+        self.state_embedding = nn.Embedding(state_dim, hidden_dim)
+        self.action_embedding = nn.Embedding(action_dim, hidden_dim)
         self.reward_embedding = nn.Linear(1, hidden_dim)
-        self.timestep_embedding = nn.Embedding(seq_len, hidden_dim)
+        self.time_embedding = nn.Embedding(seq_len, hidden_dim)
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(
                 embed_dim=hidden_dim,
                 seq_len=3 * seq_len,
+                feedforward_dim=feedforward_dim,
                 num_heads=num_attention_heads,
                 attn_dropout=attn_dropout,
                 res_dropout=res_dropout
@@ -97,7 +99,8 @@ class Transformer(nn.Module):
     ) -> torch.FloatTensor:
         batch_size, seq_len = states.shape[0], states.shape[1]
 
-        timestep_embeds = self.timestep_embedding(timesteps)
+        timestep_embeds = self.time_embedding(timesteps)
+
         states_embeds = self.state_embedding(states) + timestep_embeds
         actions_embeds = self.action_embedding(actions) + timestep_embeds
         rewards_embeds = self.reward_embedding(rewards) + timestep_embeds
@@ -110,7 +113,7 @@ class Transformer(nn.Module):
 
         if padding_mask is not None:
             padding_mask = (
-                torch.stack([padding_mask, padding_mask, padding_mask], dim=1)
+                torch.concatenate([padding_mask, padding_mask, padding_mask], axis=-1)
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )
