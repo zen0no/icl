@@ -1,5 +1,7 @@
+
+from accelerate import Accelerator
 import gc
-import os.path
+import os
 import random
 import uuid
 from dataclasses import dataclass, asdict
@@ -40,13 +42,13 @@ class TrainConfig:
     device: str = "cpu"
 
     # data
-    data_path: str = r"data\DarkRoom_q_learning"
+    data_path: str = "data/DarkRoom_q_learning"
     max_episode_steps: int = 20
     num_train_envs: int = 20_000
 
     # model
     num_attn_head: int = 4
-    num_layers: int = 8
+    num_layers: int = 16
     attn_dropout_rate: float = 0.3
     res_dropout_rate: float = 0.
     embed_dropout_rate: float = 0.
@@ -55,16 +57,17 @@ class TrainConfig:
 
     # train
     train_context_multiplier: float = 4.
-    batch_size: int = 32
+    batch_size: int = 64
     lr: float = 3e-4
     num_train_steps: int = 100_000
     warmap_steps: int = 20_000
     checkpoint_path: str = "checkpoint"
+    autocast_type = "bf16"
 
     # evaluation
     eval_env_name: str = "DarkRoom"
     eval_context_multipliers: Tuple[float] = (0.5, 1., 2., 4.)
-    eval_log_every: int = 10
+    eval_every: int = 20_000
     eval_num_episodes: int = 1000
     eval_num_envs: int = 10
 
@@ -91,8 +94,17 @@ def iter_dataloader(dataloader):
             yield batch
 
 
+def actions_to_prob_vectors(max_action: int, actions: torch.LongTensor, alpha: float = 0):
+        k1 = alpha / (max_action - 1)
+        k2 = 1 - alpha - alpha / (max_action - 1)
+        action_dists =  k1 * torch.ones((max_action, max_action)) + k2 * torch.eye(max_action)
+
+        return action_dists[actions]
+
+
 @torch.no_grad()
 def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_props):
+    model.eval()
     for multiplier in config.eval_context_multipliers:
         set_seed(config.eval_seed)
         rng = np.random.default_rng(seed=config.eval_seed)
@@ -104,13 +116,13 @@ def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_prop
 
         seq_len = int(config.max_episode_steps * multiplier)
 
-        states = torch.zeros(num_envs, seq_len, dtype=torch.long, device=config.device)
-        actions = torch.zeros(num_envs, seq_len, dtype=torch.long, device=config.device)
-        rewards = torch.zeros(num_envs, seq_len, 1, dtype=torch.float32, device=config.device)
+        states = torch.zeros(seq_len, num_envs, dtype=torch.long, device=config.device)
+        actions = torch.zeros(seq_len, num_envs, dtype=torch.long, device=config.device)
+        rewards = torch.zeros(seq_len, num_envs, 1, dtype=torch.float32, device=config.device)
 
         init_states, _ = eval_envs.reset()
 
-        states[:, -1] = torch.from_numpy(init_states).to(config.device)
+        states[-1] = torch.from_numpy(init_states).to(config.device)
 
         num_dones = np.zeros(num_envs, dtype=np.int32)
 
@@ -125,10 +137,10 @@ def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_prop
         current_lengths = np.zeros(num_envs)
 
         for i in tqdm(count(start=1), desc="Evaluation"):
-            sliced_states = states[:, -i:]
-            sliced_actions = actions[:, -i:]
-            sliced_rewards = rewards[:, -i:]
-            timesteps = torch.arange(min(i, seq_len)).expand(num_envs, -1)
+            sliced_states = states[-i:, :]
+            sliced_actions = actions[-i:, :]
+            sliced_rewards = rewards[-i:, :]
+            timesteps = torch.arange(min(i, seq_len), device=config.device).expand(num_envs, -1).T
 
             pred = model(
                 states=sliced_states,
@@ -137,7 +149,7 @@ def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_prop
                 timesteps=timesteps
             )
 
-            pred = pred[:, -1, :]
+            pred = F.softmax(pred[-1, :, :], dim=-12)
 
             dist = torch.distributions.Categorical(pred)
             action = dist.sample().squeeze(-1)
@@ -171,9 +183,20 @@ def eval_in_context(step: int, model: Transformer, config: TrainConfig, env_prop
                        name=f'{config.eval_run_name}_{multiplier}_episode_{step}_step',
                        config=asdict(config),
                        data=metrics)
+    model.train()
 
 @pyrallis.wrap()
 def train(config: TrainConfig):
+
+
+    config.autocast_dtype = (
+        "bf16"
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        else "fp16"
+    )
+    accelerator = Accelerator(mixed_precision=config.autocast_dtype)
+    config.device = accelerator.device
+
 
     dataset = SequentialDataset(
         data_path=Path(config.data_path),
@@ -210,13 +233,20 @@ def train(config: TrainConfig):
         pin_memory=True
     )
 
+    
+    model, optimizer, dataloader, scheduler = accelerator.prepare(
+        model, optimizer, dataloader, scheduler
+    )
+
     dataloader = iter_dataloader(dataloader)
 
     run = wandb.init(project=config.project,
                      group=config.group,
                      name=config.train_run_name)
 
-    for train_step in trange(0, config.num_train_steps, desc='Train'):
+    for train_step in trange(1, config.num_train_steps + 1, desc='Train'):
+        
+        optimizer.zero_grad()
 
         states, actions, rewards, timesteps, masks = next(dataloader)
 
@@ -236,7 +266,7 @@ def train(config: TrainConfig):
         pred = pred[~masks]
         action_idx = actions[~masks]
 
-        loss = F.cross_entropy(pred, torch.eye(pred.shape[-1])[action_idx])
+        loss = F.cross_entropy(pred, torch.eye(pred.shape[-1], device=config.device)[action_idx])
         run.log({"loss": loss.item()})
 
         loss.backward()
@@ -246,19 +276,18 @@ def train(config: TrainConfig):
         torch.cuda.empty_cache()
         gc.collect()
 
-    run.finish()
+        if train_step % config.eval_every == 0:
+            eval_in_context(step=train_step, model=model, config=config, env_props=dataset.meta)
+            # save train
+            checkpoint_path = Path(config.checkpoint_path)
+            checkpoint_path.mkdir(exist_ok=True, parents=True)
+            torch.save(model.state_dict(), checkpoint_path/ f"weights_{train_step}.pt")
 
-    # save train
-    checkpoint_path = Path(config.checkpoint_path)
-    checkpoint_path.mkdir(exist_ok=True, parents=True)
-    torch.save(model.state_dict(), checkpoint_path/"weights.pt")
+
     with open(str(checkpoint_path / "train_config.json"), 'r') as f:
         json.dump(asdict(config), f, indent=2)
 
-    eval_in_context(model, config, dataset.meta)
-
-
-
 
 if __name__ == "__main__":
+    os.environ["WANDB_SILENT"] = "true"
     train()

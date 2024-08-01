@@ -72,9 +72,8 @@ class Transformer(nn.Module):
         ])
 
         self.action_head = nn.Sequential(
-                                nn.Linear(hidden_dim, action_dim),
-                                nn.Softmax(dim=-1)
-        )
+                                nn.Linear(hidden_dim, action_dim)
+                                )
 
         self.embed_dropout = nn.Dropout(embed_dropout)
         self.embed_ln = nn.LayerNorm(hidden_dim)
@@ -113,7 +112,7 @@ class Transformer(nn.Module):
 
         if padding_mask is not None:
             padding_mask = (
-                torch.concatenate([padding_mask, padding_mask, padding_mask], axis=-1)
+                torch.stack([padding_mask, padding_mask, padding_mask], axis=-1)
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )

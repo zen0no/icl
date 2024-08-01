@@ -1,5 +1,7 @@
 import json
 
+from tqdm import tqdm
+
 import numpy as np
 import torch
 
@@ -20,16 +22,15 @@ def load_single_history(history_path):
                         dtype=np.uint8)
         traj_id = int(p.stem)
         trajectories[traj_id] = traj
-
     sorted_items = sorted(trajectories.items(), key=lambda x: x[0])
     history = np.concatenate([x[1] for x in sorted_items], axis=-1)
-
     return history
 
 
 def load_histories(data_path: Path):
     with mp.Pool(mp.cpu_count()) as p:
-        return p.map(load_single_history, list(data_path.glob("history_*/")))
+        paths = list(data_path.glob("history_*/"))
+        return list(tqdm(p.imap(load_single_history, paths), desc="Loaging histories...", total=len(paths)))
 
 
 # some utils functionalities specific for Decision Transformer

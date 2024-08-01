@@ -27,7 +27,7 @@ class DataCollectionConfig:
 
     # training
     num_train_envs: int = 5
-    num_train_episodes: int = 20_000
+    num_train_episodes: int = 50_000
     gamma = 0.99
     epsilon = 1.
     lr = 1e-4
