@@ -5,6 +5,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class AbsolutePositionalEncoding(nn.Module):
+    def __init__(self, hidden_dim):
+        super(AbsolutePositionalEncoding, self).__init__()
+        self.hidden_dim = hidden_dim
+    
+    def forward(self, timesteps: torch.FloatTensor):
+        _2i = torch.arange(0, self.hidden_dim, step=2, device=timesteps.device).float()
+    
+        timesteps = timesteps.unsqueeze(-1)
+        timesteps = timesteps.expand(timesteps.shape[:-1] + _2i.shape)
+        even = torch.sin(timesteps / (10000 ** (_2i / self.hidden_dim)))
+        odd = torch.cos(timesteps / (10000 ** (_2i / self.hidden_dim)))
+
+        timesteps_embeddings = torch.stack([even, odd], axis=-1).reshape(timesteps.shape[:-1] + (self.hidden_dim,))
+        
+        return timesteps_embeddings
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, embed_dim: int, seq_len: int, feedforward_dim: int, num_heads: int=4, attn_dropout: float=0., res_dropout: float=0.):
         super(TransformerBlock, self).__init__()
@@ -34,30 +52,30 @@ class TransformerBlock(nn.Module):
     ) -> torch.FloatTensor:
         causal_mask = self.causal_mask[:x.shape[1], :x.shape[1]]
 
-        norm_x = self.ln1(x)
-        attn_out = self.attn(query=norm_x,
-                             key=norm_x,
-                             value=norm_x,
+        attn_out = self.attn(query=x,
+                             key=x,
+                             value=x,
                              attn_mask=causal_mask,
                              key_padding_mask=padding_mask,
                              need_weights=False)[0]
 
-        x = x + self.res_dropout(attn_out)
-        x = x + self.mlp(self.ln2(x))
+        x = self.ln1(x + self.res_dropout(attn_out))
+        x = self.ln2(x + self.mlp(x))
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int, feedforward_dim: int,
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 64, feedforward_dim: int = 2048,
                  seq_len: int = 40, num_blocks: int = 4, num_attention_heads: int = 4,
                  attn_dropout: float =0., res_dropout: float =0., embed_dropout: float = 0.):
         super(Transformer, self).__init__()
         self.hidden_dim = hidden_dim
 
+        self.time_embedding = AbsolutePositionalEncoding(hidden_dim)
+
         self.state_embedding = nn.Embedding(state_dim, hidden_dim)
         self.action_embedding = nn.Embedding(action_dim, hidden_dim)
         self.reward_embedding = nn.Linear(1, hidden_dim)
-        self.time_embedding = nn.Embedding(seq_len, hidden_dim)
 
         self.transformer_blocks = nn.ModuleList([
             TransformerBlock(
@@ -94,10 +112,11 @@ class Transformer(nn.Module):
             actions: torch.Tensor,
             rewards: torch.Tensor,
             timesteps: torch.Tensor,
-            padding_mask: torch.Tensor = None
+            mask: torch.Tensor = None
     ) -> torch.FloatTensor:
         batch_size, seq_len = states.shape[0], states.shape[1]
-
+        
+        # absolute positional encoding
         timestep_embeds = self.time_embedding(timesteps)
 
         states_embeds = self.state_embedding(states) + timestep_embeds
@@ -110,9 +129,9 @@ class Transformer(nn.Module):
             .reshape(batch_size, 3 * seq_len, self.hidden_dim)
         )
 
-        if padding_mask is not None:
-            padding_mask = (
-                torch.stack([padding_mask, padding_mask, padding_mask], axis=-1)
+        if mask is not None:
+            mask = (
+                torch.stack([mask, mask, mask], axis=-1)
                 .permute(0, 2, 1)
                 .reshape(batch_size, 3 * seq_len)
             )
@@ -120,7 +139,8 @@ class Transformer(nn.Module):
         out = self.embed_ln(self.embed_dropout(sequence))
 
         for b in self.transformer_blocks:
-            out = b(out, padding_mask=padding_mask)
+            out = b(out, padding_mask=mask)
+            out[torch.isnan(out)] = 0
 
         out = self.action_head(out[:, 0::3])
 

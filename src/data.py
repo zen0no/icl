@@ -30,7 +30,7 @@ def load_single_history(history_path):
 def load_histories(data_path: Path):
     with mp.Pool(mp.cpu_count()) as p:
         paths = list(data_path.glob("history_*/"))
-        return list(tqdm(p.imap(load_single_history, paths), desc="Loaging histories...", total=len(paths)))
+        return list(tqdm(p.imap(load_single_history, paths), desc="Loading histories...", total=len(paths)))
 
 
 # some utils functionalities specific for Decision Transformer
@@ -47,7 +47,7 @@ def pad_along_axis(
 
 
 class SequentialDataset(IterableDataset):
-        def __init__(self, data_path: Path, seq_len: int = 40, reward_scale: float = 1.0, device: str = 'cpu'):
+        def __init__(self, data_path: Path, seq_len: int = 40, reward_scale: float = 1.0, masking_prob: float = 0.3):
 
             with open(str(data_path/ "meta.json"), "r") as f:
                 self.meta = json.load(f)
@@ -57,10 +57,9 @@ class SequentialDataset(IterableDataset):
 
             self.reward_scale = reward_scale
             self.seq_len = seq_len
-            print("Loading dataset...")
             self.histories = load_histories(data_path)
-            print("Dataset loaded")
-            self.device = device
+
+            self.masking_prob = masking_prob
 
         def __prepare_random_sample(self):
             history_idx = np.random.randint(0, len(self.histories))
@@ -70,12 +69,20 @@ class SequentialDataset(IterableDataset):
             states = hist[0, start_idx:start_idx + self.seq_len]
             actions = hist[1, start_idx:start_idx + self.seq_len]
             returns = hist[2, start_idx:start_idx + self.seq_len, None]
-            timesteps = np.arange(self.seq_len)
+
+            unpadded_seq_len = states.shape[0]
+            timesteps = np.arange(start_idx + 1, start_idx + unpadded_seq_len + 1)
 
             # pad up to seq_len if needed
-            mask = np.hstack(
-                [np.ones(self.seq_len - states.shape[0]).astype(np.bool_), np.zeros(states.shape[0]).astype(np.bool_)]
+            padding_mask = np.hstack(
+                [np.ones(self.seq_len - unpadded_seq_len).astype(np.bool_), np.zeros(unpadded_seq_len).astype(np.bool_)]
             )
+
+            random_mask = np.random.random(self.seq_len) < self.masking_prob
+
+            # always unmask 1st element of sequence
+            random_mask[self.seq_len - unpadded_seq_len] = False
+
             if states.shape[0] < self.seq_len:
                 states = pad_along_axis(states, pad_to=self.seq_len)
                 actions = pad_along_axis(actions, pad_to=self.seq_len)
@@ -85,10 +92,12 @@ class SequentialDataset(IterableDataset):
             states = torch.from_numpy(states).type(torch.long)
             actions = torch.from_numpy(actions).type(torch.long)
             returns = torch.from_numpy(returns).type(torch.float32)
-            timesteps = torch.from_numpy(timesteps).type(torch.long)
-            mask = torch.from_numpy(mask).type(torch.bool)
+            timesteps = torch.from_numpy(timesteps).type(torch.float32)
+            padding_mask = torch.from_numpy(padding_mask).type(torch.bool)
+            random_mask = torch.from_numpy(random_mask).type(torch.bool)
 
-            return states, actions, returns, timesteps, mask
+
+            return states, actions, returns, timesteps, padding_mask, random_mask
 
         def __iter__(self):
             while True:

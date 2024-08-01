@@ -61,6 +61,8 @@ class TrainConfig:
     lr: float = 3e-4
     num_train_steps: int = 100_000
     warmap_steps: int = 20_000
+    masking_prob: float = 0.3
+    label_smoothing: float = 0.
     checkpoint_path: str = "checkpoint"
     autocast_type = "bf16"
 
@@ -97,7 +99,7 @@ def iter_dataloader(dataloader):
 def actions_to_prob_vectors(max_action: int, actions: torch.LongTensor, alpha: float = 0):
         k1 = alpha / (max_action - 1)
         k2 = 1 - alpha - alpha / (max_action - 1)
-        action_dists =  k1 * torch.ones((max_action, max_action)) + k2 * torch.eye(max_action)
+        action_dists =  (k1 * torch.ones((max_action, max_action)) + k2 * torch.eye(max_action)).to(actions.device)
 
         return action_dists[actions]
 
@@ -201,7 +203,7 @@ def train(config: TrainConfig):
     dataset = SequentialDataset(
         data_path=Path(config.data_path),
         seq_len=config.train_seq_len,
-        device=config.device
+        masking_prob=config.masking_prob
     )
 
     set_seed(config.train_seed)
@@ -248,25 +250,28 @@ def train(config: TrainConfig):
         
         optimizer.zero_grad()
 
-        states, actions, rewards, timesteps, masks = next(dataloader)
+        states, actions, rewards, timesteps, padding_masks, random_masks = next(dataloader)
 
         states = states.to(config.device)
         actions = actions.to(config.device)
         rewards = rewards.to(config.device)
         timesteps = timesteps.to(config.device)
-        masks = masks.to(config.device)
+        padding_masks = padding_masks.to(config.device)
+        random_masks = random_masks.to(config.device)
+        masks = random_masks | padding_masks
 
         pred = model(
             states=states,
             actions=actions,
             rewards=rewards,
-            padding_mask=masks,
+            mask=masks,
             timesteps=timesteps
         )
-        pred = pred[~masks]
-        action_idx = actions[~masks]
+        pred = pred[~padding_masks]
+        action_idx = actions[~padding_masks]
+        actions = actions_to_prob_vectors(max_action=pred.shape[-1], actions=action_idx, alpha=config.label_smoothing)
 
-        loss = F.cross_entropy(pred, torch.eye(pred.shape[-1], device=config.device)[action_idx])
+        loss = F.cross_entropy(pred, actions)
         run.log({"loss": loss.item()})
 
         loss.backward()
